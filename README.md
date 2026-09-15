@@ -174,17 +174,27 @@ mismo patrón a escala mucho mayor:
 | Enfoque | n | Baseline | MAPE |
 |---|---|---|---|
 | Ratios entre landmarks, sin calibrar | 4.728 | 22,5% | ~22% (sin mejora real) |
-| **Calibrado con marcador de referencia (sticker)** | 4.728 | 22,5% | **17,3%** |
-| — banda 100-200 kg (78% de los datos) | 3.668 | — | **14,1%** ✅ bajo objetivo |
-| — subset limpio B4, 69-297 kg | 1.684 | 19,8% | **14,0%** ✅ bajo objetivo |
+| Calibrado, 4 distancias elegidas a mano | 4.538 | 22,5% | 16,9% |
+| **Calibrado, las 36 distancias posibles entre los 9 puntos** | 4.538 | 22,5% | **15,8%** |
+| — banda 100-200 kg (78% de los datos) | 3.518 | — | **13,1%** ✅ bajo objetivo |
+
+Reproducible con `src/validar_metodo_acmeai.py`.
 
 Calibrar con el marcador (dividir cada distancia por el tamaño en píxeles de una
 calcomanía de tamaño fijo pegada al animal, detectada en la segmentación) recuperó
-la señal: R² pasó de +0,14 (sin calibrar) a +0,44-0,47 (calibrado). Se probó además
-agregar una segunda foto trasera para capturar el ancho del animal (tercera
-dimensión que un solo lateral no puede ver) — **no mejoró nada**: el ancho correlaciona
-fuerte con las medidas laterales (r = 0,57-0,67), es información redundante por
-alometría, no un dato nuevo.
+la señal: R² pasó de +0,14 (sin calibrar) a +0,48 (calibrado, con las 36 distancias).
+Dejar que Boosting elija entre las 36 distancias posibles en vez de elegir 4 a mano
+mejoró el número de forma consistente en todas las bandas de peso — no hacía falta
+una red nueva para esto, alcanzó con darle al modelo que ya funciona más información
+de entrada.
+
+Se probaron además dos ideas que **no mejoraron nada**:
+- Agregar una segunda foto trasera para capturar el ancho del animal (tercera
+  dimensión que un solo lateral no puede ver): el ancho correlaciona fuerte con las
+  medidas laterales (r = 0,57-0,67), es información redundante por alometría.
+- Más cantidad de datos y mejores keypoints (9 en vez de 7, 65x más imágenes) **sin
+  calibrar con el marcador**: sigue dando ~22%, confirma que el problema es de
+  información faltante (escala), no de cantidad de datos ni precisión de etiquetado.
 
 **Decisión revisada**: sigue sin hacer falta ArUco, giroscopio, telémetro ni LiDAR —
 pero **sí hace falta un marcador de referencia físico simple** (una calcomanía de

@@ -10,17 +10,24 @@ referencia, no los nuestros -- antes de invertir en recolectar el dataset propio
 con el marcador incluido.
 
 Resultado (15/09/2026): sin calibrar, MAPE ~22% (apenas mejor que el baseline
-tonto). Calibrando con el marcador, ~14-17% segun banda de peso -- ya cumple el
-objetivo del acta (<15%) en la banda de 100-200 kg, que es la mayoria de los datos.
+tonto). Calibrando con el marcador y usando SOLO 4 distancias elegidas a mano
+(altura, largo, girth_f, girth_r), ~14-17% segun banda de peso. Usando TODAS las
+distancias posibles entre los 9 keypoints (36 pares, calibradas por el sticker) y
+dejando que Boosting elija cuales importan -- en vez de elegir 4 a mano -- el
+numero mejora a ~15,3% general y ~12,9% en la banda de 100-200 kg (la mayoria de
+los datos), que ya cumple el objetivo del acta (<15%) ahi. Este es el resultado
+que se reporta.
+
 Se investigo si el error restante viene de imprecision de calibracion (tamano
 aparente del sticker, o que no quede de frente a camara) y NO -- ninguna de las
-dos correlaciona con el error. El techo parece estructural: una sola foto lateral
-con un solo marcador no puede recuperar la circunferencia real del pecho (solo un
-proxy de profundidad), ni corregir que cada landmark esta a una profundidad
-distinta de la camara. Detalle completo en README.md.
+dos correlaciona con el error. El techo restante parece estructural: una sola
+foto lateral con un solo marcador no puede recuperar la circunferencia real del
+pecho (solo un proxy de profundidad), ni corregir que cada landmark esta a una
+profundidad distinta de la camara. Detalle completo en README.md.
 
 Uso:  python src/validar_metodo_acmeai.py
 """
+import itertools
 import json
 import re
 import sys
@@ -38,102 +45,75 @@ from sklearn.preprocessing import StandardScaler
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 
-# Distintos batches, distinto color de sticker y distinto orden/nombre de keypoints.
-BATCHES = [
-    dict(
-        nombre="b2",
-        json_path="Vector/B2/Side/data/Side/COCO_Side.json",
-        mask_dir="Pixel/B2/Side/annotations",
-        sticker_rgb=(255, 240, 0),
-        patron=re.compile(r"^([\d.]+)_s_(\d+)_[\d.]+_([MF])\.jpg$", re.IGNORECASE),
-        extraer=lambda g: (g[0], g[1], g[2]),  # id, peso, sexo
-        con_altura=False,
-    ),
-    dict(
-        nombre="b3",
-        json_path="Vector/B3/Side/data/COCO_Side.json",
-        mask_dir="Pixel/B3/annotations",
-        sticker_rgb=(0, 117, 255),
-        patron=re.compile(r"^(\d+)_s_(\d+)_([MF])\.jpg$", re.IGNORECASE),
-        extraer=lambda g: (g[0], g[1], g[2]),  # id, peso, sexo
-        con_altura=True,
-    ),
-    dict(
-        nombre="b4",
-        json_path="Vector/B4/Side/data/coco_b4_side.json",
-        mask_dir="Pixel/B4/Side/annotations",
-        sticker_rgb=(0, 117, 255),
-        patron=re.compile(r"^(\d+)_(b4-\d+)_s_(\d+)_([MF])\.jpg$", re.IGNORECASE),
-        extraer=lambda g: (g[0], g[2], g[3]),  # id, batchid, peso, sexo -> saltea batchid
-        con_altura=True,
-    ),
-]
+STICKER_RGB = {"b2": (255, 240, 0), "b3": (0, 117, 255), "b4": (0, 117, 255)}
+
+# B3 y B4 comparten los mismos 9 landmarks (mismos nombres, orden distinto en el
+# json -- por eso se mapea por nombre, no por indice). B2 tiene un esquema mas
+# chico (6 puntos, sin shoulderbone ni height) y se trata aparte.
+ALIAS = {
+    "front_girth_top": "front_top", "front_girth_bottom": "front_bottom",
+    "rear_girth_top": "rear_top", "rear_girth_bottom": "rear_bottom",
+}
 
 
 def normalizar(nombre):
-    n = nombre.lower().lstrip("0123456789_")
-    return n.replace("-", "_")
+    n = nombre.lower().lstrip("0123456789_").replace("-", "_")
+    return ALIAS.get(n, n)
 
 
-def procesar_batch(cfg):
-    raiz = config.DATASET_ACMEAI
-    with open(raiz / cfg["json_path"], encoding="utf-8") as f:
+def cargar_json(ruta):
+    with open(ruta, encoding="utf-8") as f:
         d = json.load(f)
     imgs = {im["id"]: im for im in d["images"]}
-    nombres_kp = [normalizar(n) for n in d["categories"][0]["keypoints"]]
-    idx = {n: i for i, n in enumerate(nombres_kp)}
+    nombres = [normalizar(n) for n in d["categories"][0]["keypoints"]]
+    return d, imgs, nombres
 
-    necesarios = ["wither", "pinbone", "front_top", "front_bottom", "rear_top", "rear_bottom"]
-    # B2 usa "front-top/front-bottom/rear-top/rear-bottom", B3/B4 usan
-    # "front_girth_top/bottom" y "rear_girth_top/bottom" -- unificamos alias.
-    alias = {
-        "front_girth_top": "front_top", "front_girth_bottom": "front_bottom",
-        "rear_girth_top": "rear_top", "rear_girth_bottom": "rear_bottom",
-    }
-    for k, v in list(idx.items()):
-        if k in alias:
-            idx[alias[k]] = v
 
-    mask_dir = raiz / cfg["mask_dir"]
-    filas, sin_mascara, sin_sticker = [], 0, 0
+def sticker_size_px(mask, sticker_rgb, ancho_real, alto_real):
+    sticker = (mask == sticker_rgb).all(axis=-1)
+    if sticker.sum() < 20:
+        return None
+    ys, xs = np.where(sticker)
+    ancho_mask, alto_mask = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
+    mh, mw = mask.shape[:2]
+    sx, sy = mw / ancho_real, mh / alto_real
+    return ((ancho_mask / sx) * (alto_mask / sy)) ** 0.5
+
+
+def procesar(nombre_batch, json_path, mask_dir, patron, extraer):
+    """Devuelve un DataFrame con TODAS las distancias entre pares de keypoints
+    (calibradas por el sticker), nombradas por nombre de landmark (no indice) para
+    que sean comparables entre batches aunque el orden del json difiera."""
+    raiz = config.DATASET_ACMEAI
+    d, imgs, nombres = cargar_json(raiz / json_path)
+    idx = {n: i for i, n in enumerate(nombres)}
+    pares = list(itertools.combinations(sorted(idx), 2))
+    mask_dir = raiz / mask_dir
+
+    filas = []
     for ann in d["annotations"]:
         fn = imgs[ann["image_id"]]["file_name"]
-        m = cfg["patron"].match(fn)
-        if not m or ann["num_keypoints"] < len(nombres_kp):
+        m = patron.match(fn)
+        if not m or ann["num_keypoints"] < len(nombres):
             continue
-        aid, peso, sexo = cfg["extraer"](m.groups())
-
+        aid, peso, sexo = extraer(m.groups())
         mpath = mask_dir / f"{fn}___fuse.png"
         if not mpath.exists():
-            sin_mascara += 1
             continue
         mask = np.array(Image.open(mpath).convert("RGB"))
-        sticker_px = (mask == cfg["sticker_rgb"]).all(axis=-1)
-        if sticker_px.sum() < 20:
-            sin_sticker += 1
-            continue
-        ys, xs = np.where(sticker_px)
-        ancho_mask, alto_mask = xs.max() - xs.min() + 1, ys.max() - ys.min() + 1
-        mh, mw = mask.shape[:2]
         im = imgs[ann["image_id"]]
-        sx, sy = mw / im["width"], mh / im["height"]
-        sticker_size = ((ancho_mask / sx) * (alto_mask / sy)) ** 0.5
+        tam = sticker_size_px(mask, STICKER_RGB[nombre_batch], im["width"], im["height"])
+        if tam is None:
+            continue
 
-        kp = np.array(ann["keypoints"], float).reshape(len(nombres_kp), 3)[:, :2]
-        dist = lambda a, b: float(np.linalg.norm(kp[idx[a]] - kp[idx[b]]))
-        fila = {
-            "batch": cfg["nombre"], "grupo": f"{cfg['nombre']}_{aid}_{peso}_{sexo}",
-            "peso_kg": float(peso), "largo": dist("wither", "pinbone"),
-            "girth_f": dist("front_top", "front_bottom"),
-            "girth_r": dist("rear_top", "rear_bottom"),
-            "sticker_px": sticker_size,
-        }
-        if cfg["con_altura"]:
-            fila["altura"] = dist("height_top", "height_bottom")
+        kp = np.array(ann["keypoints"], float).reshape(len(nombres), 3)[:, :2]
+        fila = {"batch": nombre_batch, "grupo": f"{nombre_batch}_{aid}_{peso}_{sexo}",
+                "peso_kg": float(peso)}
+        for a, b in pares:
+            fila[f"d_{a}_{b}"] = float(np.linalg.norm(kp[idx[a]] - kp[idx[b]])) / tam
         filas.append(fila)
 
-    print(f"  {cfg['nombre']}: {len(filas)} utilizables "
-          f"(sin mascara {sin_mascara}, sin sticker {sin_sticker})")
+    print(f"  {nombre_batch}: {len(filas)} filas, {len(pares)} distancias calibradas c/u")
     return pd.DataFrame(filas)
 
 
@@ -143,7 +123,7 @@ def evaluar(df, cols, etiqueta, franjas=None):
     g = df["grupo"].to_numpy()
     base = np.mean(np.abs((y - np.median(y)) / y)) * 100
     print(f"\n=== {etiqueta} (n={len(df)}, peso {y.min():.0f}-{y.max():.0f} kg, "
-          f"baseline {base:.2f}%) ===")
+          f"baseline {base:.2f}%, {len(cols)} features) ===")
     for nombre, m in [
         ("Ridge", make_pipeline(StandardScaler(), RidgeCV(alphas=np.logspace(-3, 4, 40)))),
         ("Boosting", HistGradientBoostingRegressor(
@@ -170,26 +150,41 @@ def main():
         print("Ver CLAUDE.md para donde conseguirlo.")
         return
 
+    pat_b2 = re.compile(r"^([\d.]+)_s_(\d+)_[\d.]+_([MF])\.jpg$", re.IGNORECASE)
+    pat_b3 = re.compile(r"^(\d+)_s_(\d+)_([MF])\.jpg$", re.IGNORECASE)
+    pat_b4 = re.compile(r"^(\d+)_(b4-\d+)_s_(\d+)_([MF])\.jpg$", re.IGNORECASE)
+
     print("Procesando batches...")
-    dfs = [procesar_batch(cfg) for cfg in BATCHES]
-    df = pd.concat(dfs, ignore_index=True)
+    df2 = procesar("b2", "Vector/B2/Side/data/Side/COCO_Side.json",
+                    "Pixel/B2/Side/annotations", pat_b2, lambda g: (g[0], g[1], g[2]))
+    df3 = procesar("b3", "Vector/B3/Side/data/COCO_Side.json",
+                    "Pixel/B3/annotations", pat_b3, lambda g: (g[0], g[1], g[2]))
+    df4 = procesar("b4", "Vector/B4/Side/data/coco_b4_side.json",
+                    "Pixel/B4/Side/annotations", pat_b4, lambda g: (g[0], g[2], g[3]))
+
     config.TABLAS.mkdir(parents=True, exist_ok=True)
-    df.to_csv(config.TABLAS / "acmeai_b2_b3_b4_side.csv", index=False)
+    df3.to_csv(config.TABLAS / "acmeai_b3_distancias.csv", index=False)
+    df4.to_csv(config.TABLAS / "acmeai_b4_distancias.csv", index=False)
+    df2.to_csv(config.TABLAS / "acmeai_b2_distancias.csv", index=False)
 
-    # las 3 features que tienen TODOS los batches (B2 no tiene 'altura')
-    for c in ["largo", "girth_f", "girth_r"]:
-        df[f"cal_{c}"] = df[c] / df["sticker_px"]
-    cols_comun = [f"cal_{c}" for c in ["largo", "girth_f", "girth_r"]]
-    evaluar(df, cols_comun, "B2+B3+B4, 3 features comunes")
-
-    # con altura, solo B3+B4 -- este es el numero que se reporta (14%): un solo
-    # modelo entrenado con TODO el rango de peso, y se mira el error por franja
-    # (no se entrena un modelo aparte para cada franja, seria optimista)
-    df34 = df[df.batch != "b2"].copy()
-    df34["cal_altura"] = df34["altura"] / df34["sticker_px"]
-    cols_4 = cols_comun + ["cal_altura"]
+    # --- resultado principal: B3+B4, comparten los 9 landmarks -> 36 pares ---
+    cols_comunes_34 = sorted(set(c for c in df3.columns if c.startswith("d_"))
+                              & set(c for c in df4.columns if c.startswith("d_")))
+    df34 = pd.concat([df3, df4], ignore_index=True)
     franjas = [(0, 100), (100, 200), (200, 300), (300, 10_000)]
-    evaluar(df34, cols_4, "B3+B4, con altura (4 features) -- NUMERO A REPORTAR", franjas)
+    evaluar(df34, cols_comunes_34,
+            "B3+B4, todas las distancias (36 pares) -- NUMERO A REPORTAR", franjas)
+
+    # --- chequeo secundario con B2 incluido: solo el subconjunto de puntos que
+    #     tienen los 3 batches (wither, pinbone, front/rear top/bottom) ---
+    comunes_3 = {"wither", "pinbone", "front_top", "front_bottom", "rear_top", "rear_bottom"}
+    cols_comunes_3batches = sorted(f"d_{a}_{b}" for a, b in itertools.combinations(sorted(comunes_3), 2))
+    dfx = pd.concat([df2, df3, df4], ignore_index=True)
+    faltan = [c for c in cols_comunes_3batches if c not in dfx.columns]
+    if faltan:
+        print(f"\n(no se pudo armar el chequeo con B2: faltan columnas {faltan})")
+    else:
+        evaluar(dfx, cols_comunes_3batches, "B2+B3+B4, subconjunto de puntos comun a los 3")
 
 
 if __name__ == "__main__":
