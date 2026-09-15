@@ -1,6 +1,7 @@
 # Dataset: cada persona lo descarga a mano, ver README.md
 # (2,3 GB de zip + 2,3 GB descomprimido, no entra en un repo git normal)
 data/
+www.acmeai.tech Dataset - BMGF-LivestockWeight-CV
 
 # Pesos preentrenados que ultralytics descarga solo la primera vez
 *.pt

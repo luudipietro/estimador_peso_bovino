@@ -56,15 +56,27 @@ def a_ratios(d):
 
 
 def desde_labels(carpeta: Path):
-    """Lee anotaciones en formato YOLO pose: cls cx cy w h  (x y v)*7, normalizadas."""
+    """Lee anotaciones en formato YOLO pose: cls cx cy w h  (x y v)*7, normalizadas.
+
+    Las coordenadas vienen normalizadas 0-1 (relativas al ancho/alto de cada
+    imagen). Hay que volver a pixeles reales antes de calcular distancias: las
+    imagenes son 1024x768 (no cuadradas), asi que normalizado != pixeles, y
+    mezclar las dos escalas distorsiona distancias verticales vs horizontales
+    de forma distinta (por eso desde_modelo() ya usa xy en vez de xyn).
+    """
+    from PIL import Image
+    imgs_dir = Path(__file__).resolve().parents[1] / "etiquetado" / "imagenes"
+
     filas = []
     for p in sorted(carpeta.rglob("*.txt")):
         partes = p.read_text().split()
         if len(partes) < 5 + 7 * 3:
             print(f"  {p.name}: sin los 7 keypoints, salteado")
             continue
+        ancho, alto = Image.open(imgs_dir / f"{p.stem}.jpg").size
         v = np.array(partes[5:5 + 21], float).reshape(7, 3)
-        filas.append((int(p.stem), v[:, :2]))
+        kp = v[:, :2] * np.array([ancho, alto])
+        filas.append((int(p.stem), kp))
     return filas
 
 

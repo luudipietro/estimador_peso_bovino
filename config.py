@@ -15,3 +15,7 @@ URL_DATASET = "https://data.mendeley.com/datasets/h2s22wr5py/2"
 
 for d in (DATOS, CRUDO, MASCARAS, TABLAS):
     d.mkdir(parents=True, exist_ok=True)
+
+# Segundo dataset (externo, validacion del marcador de referencia). Vive en la raiz
+# del proyecto, afuera de modelo-peso/, no versionado. Ver CLAUDE.md.
+DATASET_ACMEAI = Path(__file__).resolve().parent.parent / "www.acmeai.tech Dataset - BMGF-LivestockWeight-CV"

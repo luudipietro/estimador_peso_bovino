@@ -5,13 +5,19 @@ público con peso de báscula antes de salir a recolectar datos propios.
 
 ## Enfoque
 
-**Sin escala métrica.** No se mide en centímetros ni se usa marcador, giroscopio ni
-LiDAR. El peso se infiere de la **forma** de la silueta, aprovechando que un bovino
-no escala uniformemente: un ternero de 200 kg tiene proporciones distintas a una vaca
-de 500 kg. Es lo que hacen los productos comerciales que ya funcionan en el mercado
-(Peso Certo en Brasil reporta ~8,6% de error por animal con una sola foto lateral).
+**Actualizado 15/09/2026 — ver sección "El marcador de referencia sí hace falta" más
+abajo. Esta sección de arriba queda desactualizada, se deja el texto original solo
+como registro histórico de la primera hipótesis (que se descartó con evidencia).**
 
-El objetivo del acta es MAPE < 15%. El techo conocido del 2D es ~8,6%.
+~~Sin escala métrica. No se mide en centímetros ni se usa marcador, giroscopio ni
+LiDAR. El peso se infiere de la forma de la silueta, aprovechando que un bovino
+no escala uniformemente: un ternero de 200 kg tiene proporciones distintas a una vaca
+de 500 kg.~~ Es lo que hacen algunos productos comerciales (Peso Certo en Brasil
+reporta ~8,6% de error por animal con una sola foto lateral) — pero como se detalla
+abajo, a nosotros nos hizo falta agregar un marcador físico de referencia para
+acercarnos a ese nivel de precisión.
+
+El objetivo del acta es MAPE < 15%. El techo conocido del 2D (con marcador) es ~8,6%.
 
 ## Pipeline
 
@@ -146,6 +152,66 @@ expertos. Los keypoints predichos por un modelo van a tener error y eso degrada 
 número. Es el techo del enfoque, no lo que van a obtener. El margen hasta el 15% es
 grande, pero hay que medirlo, no suponerlo.
 
+## El marcador de referencia SÍ hace falta (15/09/2026)
+
+La advertencia de arriba se cumplió: al etiquetar las 72 imágenes propias a mano y
+medir contra el ratio real (`largo_corporal_cm / altura_cruz_cm`), la correlación
+entre el ratio calculado desde la foto y el ratio real del mismo animal fue **r =
+0,035** — prácticamente nula. No era un problema de etiquetado (se verificó
+visualmente, y el mapeo animal↔peso), sino de que **la distancia y el ángulo de
+cámara no estaban controlados**: dos distancias de una misma foto sí comparten un
+factor de escala común (r = 0,58-0,71 entre sí), pero ese factor casi no correlaciona
+con el tamaño real del animal (r = 0,15-0,22) — la mayor parte de lo que varía en
+píxeles de foto a foto es ruido de cámara/pose, no información real, y un ratio entre
+dos cantidades mayormente-ruido no cancela el ruido, lo combina.
+
+**Validación externa e independiente**: el dataset público de Acme AI/BMGF
+(`www.acmeai.tech Dataset - BMGF-LivestockWeight-CV`, no versionado en este repo —
+ver más abajo cómo conseguirlo) — 4.728 imágenes reales de campo en Bangladesh, con
+peso de báscula y 9 keypoints anatómicos etiquetados profesionalmente — confirma el
+mismo patrón a escala mucho mayor:
+
+| Enfoque | n | Baseline | MAPE |
+|---|---|---|---|
+| Ratios entre landmarks, sin calibrar | 4.728 | 22,5% | ~22% (sin mejora real) |
+| **Calibrado con marcador de referencia (sticker)** | 4.728 | 22,5% | **17,3%** |
+| — banda 100-200 kg (78% de los datos) | 3.668 | — | **14,1%** ✅ bajo objetivo |
+| — subset limpio B4, 69-297 kg | 1.684 | 19,8% | **14,0%** ✅ bajo objetivo |
+
+Calibrar con el marcador (dividir cada distancia por el tamaño en píxeles de una
+calcomanía de tamaño fijo pegada al animal, detectada en la segmentación) recuperó
+la señal: R² pasó de +0,14 (sin calibrar) a +0,44-0,47 (calibrado). Se probó además
+agregar una segunda foto trasera para capturar el ancho del animal (tercera
+dimensión que un solo lateral no puede ver) — **no mejoró nada**: el ancho correlaciona
+fuerte con las medidas laterales (r = 0,57-0,67), es información redundante por
+alometría, no un dato nuevo.
+
+**Decisión revisada**: sigue sin hacer falta ArUco, giroscopio, telémetro ni LiDAR —
+pero **sí hace falta un marcador de referencia físico simple** (una calcomanía de
+tamaño y color fijos, no electrónica) en cada foto de captura. No cambia la
+Exclusión de TP2 de "no habrá app nativa": no es hardware ni sensor del teléfono.
+
+Especificación del marcador para el dataset propio:
+- Forma circular, color que no aparezca en el pelaje (verde o naranja flúor) —
+  se detecta por umbral de color simple, no hace falta entrenar segmentación para esto.
+- Tamaño fijo y consistente entre todos los animales (no hace falta saber el tamaño
+  real en cm — el modelo aprende la relación en "unidades de sticker"; documentar el
+  tamaño real igual es buena práctica).
+- Ubicación estandarizada y consistente en el cuerpo (ej. mitad del costado), visible,
+  sin obstrucciones.
+- Una sola foto lateral alcanza (se descartó la necesidad de una segunda foto trasera)
+  — el evento de pesaje se mantiene en <60s.
+
+Toda la extracción + calibración + evaluación de esta sección está formalizada en
+`src/validar_metodo_acmeai.py` — correrlo reproduce estos números (necesita tener
+`www.acmeai.tech Dataset - BMGF-LivestockWeight-CV/` en la raíz del proyecto, ver
+`CLAUDE.md`).
+
+Se recomienda además migrar de los 7 landmarks actuales a los 9 que usa AcmeAI
+(agrega `shoulderbone` y separa `height_top`/`height_bottom` como par vertical
+dedicado, en vez de nuestro `cruz`→`pezuña` diagonal) — ver `etiquetado/README.md`
+para la guía a actualizar.
+
 ## Estado
 
 - [x] Entorno: torch 2.14 CPU, OpenCV 5, scikit-learn 1.9, ultralytics 8.4
@@ -156,14 +222,30 @@ grande, pero hay que medirlo, no suponerlo.
 - [x] Hipótesis escala-libre por ratios entre landmarks **confirmada** (5,53%)
 - [x] Proyecto de etiquetado listo: 72 imágenes exportadas + guía de 7 landmarks
 - [x] Config y script de YOLO-pose listos
-- [ ] Etiquetar las 72 imágenes (18 c/u, ver `etiquetado/README.md`)
-- [ ] Entrenar YOLO-pose y medir cuánto degrada el error de keypoint al 5,53%
+- [x] Etiquetar las 72 imágenes (hecho, un solo integrante etiquetó las 72)
+- [x] Entrenar YOLO-pose y medir el error real con keypoints predichos
+      (`evaluar_holdout.py`, sin contaminar con animales ya vistos en el entrenamiento)
+- [x] Diagnosticar por qué el ratio sin calibrar da peor que el baseline
+      (r=0,035 entre ratio en foto y ratio real — ver sección de arriba)
+- [x] Validar la hipótesis del marcador de referencia con dataset externo (AcmeAI,
+      4.728 imágenes) — **confirmada**: 14-17% MAPE calibrado, bajo objetivo en la
+      banda de 100-200 kg
+- [ ] Definir y conseguir el marcador físico (sticker) para el dataset propio
+- [ ] Actualizar `etiquetado/README.md` a 9 landmarks + posición del sticker
+- [ ] Reetiquetar/etiquetar el dataset propio con el marcador ya incluido desde el
+      primer registro
 
 ## Cómo sigue
 
 ```bash
 python src/exportar_etiquetado.py          # ya corrido: 72 imagenes en etiquetado/imagenes
 # etiquetar en CVAT o Roboflow -> exportar formato YOLO pose
-python src/entrenar_pose.py                # YOLO-pose, 7 keypoints
-python src/medidas_desde_keypoints.py      # keypoints -> ratios -> peso
+python src/entrenar_pose.py                # YOLO-pose, 7 (o 9) keypoints
+python src/evaluar_holdout.py              # MAPE real, sin contaminar train/val
+python src/medidas_desde_keypoints.py      # keypoints -> ratios -> peso (evaluación)
 ```
+
+Antes de salir a recolectar el dataset propio: conseguir el sticker de calibración
+y actualizar la guía de etiquetado (ver sección "El marcador de referencia SÍ hace
+falta" arriba) — si se arranca a fotografiar sin el marcador, hay que repetir la
+captura completa.
