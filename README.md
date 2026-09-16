@@ -5,9 +5,15 @@ público con peso de báscula antes de salir a recolectar datos propios.
 
 ## Enfoque
 
-**Actualizado 15/09/2026 — ver sección "El marcador de referencia sí hace falta" más
-abajo. Esta sección de arriba queda desactualizada, se deja el texto original solo
-como registro histórico de la primera hipótesis (que se descartó con evidencia).**
+**Leer las secciones fechadas en orden antes que esto.** El texto tachado de acá
+abajo es la primera hipótesis, descartada con evidencia el 08/09. Después el
+proyecto pasó por dos conclusiones más:
+
+1. **"El marcador de referencia SÍ hace falta"** (15/09) — calibrar con una
+   calcomanía pegada al animal baja el MAPE de ~22% a 15,8%.
+2. **"El sticker puede ser un callejón sin salida"** (15/09, más abajo) — ese
+   15,8% es un techo que el sticker no puede romper, y hay una alternativa sin
+   marcador pendiente de medir. **Ahí está la decisión abierta hoy.**
 
 ~~Sin escala métrica. No se mide en centímetros ni se usa marcador, giroscopio ni
 LiDAR. El peso se infiere de la forma de la silueta, aprovechando que un bovino
@@ -35,6 +41,8 @@ imagen → YOLO-seg (clase 'cow' de COCO, sin entrenar) → máscara
 | `src/segmentar.py` | YOLO-seg sobre cada imagen → máscara binaria |
 | `src/features.py` | 71 descriptores de forma, ninguno en centímetros |
 | `src/entrenar.py` | GroupKFold por animal + Ridge/Boosting + MAPE por franja |
+| `src/validar_metodo_acmeai.py` | Valida el método **con sticker** sobre AcmeAI (15,8%) |
+| `src/validar_profundidad_monocular.py` | Valida la alternativa **sin sticker**, con profundidad monocular métrica |
 
 ## Paso manual: bajar el dataset (cada integrante, una vez)
 
@@ -222,6 +230,123 @@ Se recomienda además migrar de los 7 landmarks actuales a los 9 que usa AcmeAI
 dedicado, en vez de nuestro `cruz`→`pezuña` diagonal) — ver `etiquetado/README.md`
 para la guía a actualizar.
 
+## El sticker puede ser un callejón sin salida (15/09/2026)
+
+Antes de comprar la calcomanía y repetir la captura, conviene mirar dos veces la
+conclusión de la sección anterior. Está bien medida pero está mal nombrada: el
+problema no es "falta escala", es **falta geometría 3D**. Una foto es una
+proyección perspectiva, no una semejanza, y eso rompe dos cosas distintas:
+
+| | Qué es | ¿Lo arregla el sticker? |
+|---|---|---|
+| **Escala global** | la distancia de captura varía → todo el animal crece o achica | ✅ sí |
+| **Escorzo / profundidad por punto** | el animal no está perpendicular al eje óptico, y `encuentro` está ~40 cm más cerca de la cámara que `isquion` | ❌ **no, nunca** |
+
+Lo segundo es exactamente lo que quedó documentado como el techo restante en el
+docstring de `validar_metodo_acmeai.py`: *"cada landmark está a una profundidad
+distinta de la cámara"*. El sticker calibra **un** factor global medido a **una**
+profundidad (el flanco). Por construcción no puede corregir lo otro.
+
+Consecuencia incómoda: el sticker no es solo molesto operativamente, **tiene
+techo en ~15%**. Aunque se consiga la calcomanía, se actualice la guía de
+etiquetado y se repita la captura entera, se choca contra el mismo límite.
+
+### La alternativa: profundidad monocular métrica
+
+Los modelos de profundidad monocular **métrica** (Depth Pro, UniDepth, Metric3D)
+salen de una sola RGB y devuelven Z(u,v) **en metros**, más la focal en píxeles
+—Depth Pro la predice él mismo cuando no hay EXIF—. Con eso cada keypoint se
+retroproyecta a 3D:
+
+```
+X = (u−cx)·Z/f      Y = (v−cy)·Z/f      Z
+```
+
+y las 36 distancias dejan de estar en píxeles o en "unidades de sticker": pasan a
+ser **metros reales en 3D**. Resuelve los dos problemas de la tabla de arriba con
+un solo modelo, y **no hay que tocar al animal**.
+
+De yapa, con la máscara y Z salen dos features que ninguna distancia captura:
+**área proyectada en m²** y un **volumen en m³**. El volumen es la variable que
+uno querría de entrada — es la única con unidades de masa/densidad.
+
+Evidencia de la literatura, toda posterior a la primera tanda de experimentos:
+
+| Trabajo | Resultado |
+|---|---|
+| *J. Anim. Sci.* 2026 — keypoints + profundidad monocular zero-shot, peso bovino | **R² 0,95 / RMSE 24,2 kg**, contra R² 0,90 / RMSE 32,9 kg con los keypoints 2D solos |
+| *Expert Syst. Appl.* 2024 — keypoints + profundidad monocular **a distancias variables** | error 6,75% altura, 7,55% largo, 8,00% profundidad de pecho |
+| LaWE (*Eng. Appl. AI* 2025) — "readily photos" desde el celular | usa **stickers circulares** para normalizar escala |
+| PickAMoo 2025 — celular en el campo | usa **LiDAR para controlar la distancia**, normaliza a 2,00 m |
+
+Las dos últimas confirman que la conclusión de la sección anterior no estaba mal:
+el marcador es el estado de la práctica. Simplemente no es la única salida, y es
+la de menor techo.
+
+### El experimento decisivo no necesita una sola foto nueva
+
+El dataset de AcmeAI tiene el sticker en las 4.538 fotos útiles. Eso permite
+usarlo como **regla de validación** en vez de como entrada del modelo:
+
+- el sticker tiene tamaño real fijo y desconocido S, así que `sticker_px = f·S/Z`
+  → la escala "píxeles por metro" a la profundidad del animal es **proporcional a
+  `sticker_px`**;
+- la red de profundidad estima esa misma cantidad como **`f / Z_animal`**.
+
+Si las dos correlacionan fuerte, la red mide lo que mide el sticker y el sticker
+se puede tirar. Es un coeficiente de correlación contra 4.538 fotos con peso de
+báscula, **sin entrenar nada y sin recolectar nada**.
+
+`src/validar_profundidad_monocular.py` hace ese diagnóstico y además el A/B
+completo contra el 15,8% actual, en la misma corrida:
+
+```bash
+uv run python src/validar_profundidad_monocular.py --limite 400
+uv run python src/validar_profundidad_monocular.py --solo-evaluar   # reusa el CSV cacheado
+```
+
+Criterio de lectura, fijado **antes** de correrlo para no racionalizar después:
+
+- `r > 0,90` y CV del factor red/sticker `< 10%` → el sticker es prescindible.
+- `r < 0,70` → la red no recupera la escala acá, se compra la calcomanía y listo.
+
+La geometría del script está verificada con una escena sintética (un "bovino"
+plano de 1,80 × 1,20 m): las distancias 3D dan 0,19% de error, el área da exacto,
+y **el mismo animal fotografiado a 4 m y a 7 m arroja la misma área con 0,28% de
+desvío — en píxeles crudos habría cambiado 67%**. Ese par de números es el
+argumento entero.
+
+Detalle que casi arruina el experimento y quedó cubierto: `wither`, `pinbone` y
+los de *girth* caen **sobre el borde** de la silueta, donde Z salta al fondo. Un
+muestreo puntual daba 30 m en vez de 4 m. Por eso `z_robusto()` toma la mediana
+restringida a los píxeles de adentro de la máscara.
+
+### Complementos que tampoco tocan al animal
+
+Si la profundidad sola no alcanza, estos se suman y son gratis:
+
+1. **Controlar la distancia en vez de calibrarla.** Una estaca, una soga de 3 m o
+   una raya pintada en el piso del corral. La escala pasa a ser constante y el
+   modelo la absorbe. Es lo que hace PickAMoo con LiDAR, pero con una soga.
+2. **Mover el marcador de la vaca al ambiente.** Marcas pintadas en el barral de
+   la manga, o una tabla de tamaño fijo atrás. Cumple la restricción al 100% y es
+   setup de una sola vez, no por animal.
+3. **El giroscopio entra dentro de la Exclusión de TP2.** `DeviceOrientationEvent`
+   funciona desde una web con HTTPS (en iOS pide permiso tras un gesto del
+   usuario, en Android es directo): no es app nativa. Da pitch/roll → línea de
+   horizonte → metrología de vista única con altura de cámara conocida, y además
+   permite **rechazar fotos mal tomadas en el momento de sacarlas**.
+
+Se descartó la **caravana SENASA** como regla de referencia: la botón-botón es de
+21 mm **±5 mm** por Resolución 754/2006. ±24% de variación es peor que el ruido
+que se quiere eliminar.
+
+### Decisión
+
+**No comprar el sticker todavía.** Correr primero el diagnóstico de escala: son
+unas horas de cómputo sobre datos que ya están bajados, y define la arquitectura
+del trabajo entero.
+
 ## Estado
 
 - [x] Entorno: torch 2.14 CPU, OpenCV 5, scikit-learn 1.9, ultralytics 8.4
@@ -240,12 +365,31 @@ para la guía a actualizar.
 - [x] Validar la hipótesis del marcador de referencia con dataset externo (AcmeAI,
       4.728 imágenes) — **confirmada**: 14-17% MAPE calibrado, bajo objetivo en la
       banda de 100-200 kg
-- [ ] Definir y conseguir el marcador físico (sticker) para el dataset propio
-- [ ] Actualizar `etiquetado/README.md` a 9 landmarks + posición del sticker
-- [ ] Reetiquetar/etiquetar el dataset propio con el marcador ya incluido desde el
-      primer registro
+- [x] Escribir el A/B sin marcador (`validar_profundidad_monocular.py`), con la
+      geometría verificada sobre una escena sintética
+- [ ] **Correrlo** y decidir con el criterio ya fijado (r > 0,90 → sin sticker)
+- [ ] ⏸️ Definir y conseguir el marcador físico (sticker) — **en pausa hasta que
+      salga el diagnóstico de escala**
+- [ ] Actualizar `etiquetado/README.md` a 9 landmarks (+ posición del sticker solo
+      si el diagnóstico dice que hace falta)
+- [ ] Reetiquetar/etiquetar el dataset propio con el protocolo que resulte
 
 ## Cómo sigue
+
+**Lo primero, porque define todo lo demás:**
+
+```bash
+uv sync                                                    # agrega transformers + timm
+uv run python src/validar_profundidad_monocular.py --limite 400
+```
+
+Ese comando imprime el diagnóstico de escala (red vs sticker) y el A/B contra el
+15,8%. Depth Pro son ~1,9 GB de descarga la primera vez y corre lento en CPU
+(~20-40 s/imagen), así que conviene una máquina con GPU. El resultado queda
+cacheado en `data/tablas/acmeai_profundidad.csv`, y con `--solo-evaluar` se
+reevalúa sin volver a inferir.
+
+**Después, según lo que dé:**
 
 ```bash
 python src/exportar_etiquetado.py          # ya corrido: 72 imagenes en etiquetado/imagenes
@@ -255,7 +399,7 @@ python src/evaluar_holdout.py              # MAPE real, sin contaminar train/val
 python src/medidas_desde_keypoints.py      # keypoints -> ratios -> peso (evaluación)
 ```
 
-Antes de salir a recolectar el dataset propio: conseguir el sticker de calibración
-y actualizar la guía de etiquetado (ver sección "El marcador de referencia SÍ hace
-falta" arriba) — si se arranca a fotografiar sin el marcador, hay que repetir la
-captura completa.
+No salir a recolectar el dataset propio hasta tener el diagnóstico: el protocolo
+de captura (con sticker, sin sticker, con distancia controlada) es justamente lo
+que ese experimento decide, y si se arranca a fotografiar con el protocolo
+equivocado hay que repetir la captura completa.
